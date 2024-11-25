@@ -1,0 +1,4 @@
+location,waiting_passengers,average_waiting,timestamp
+Stop A,80,50,2024-11-18T10:00:00Z
+Stop B,30,40,2024-11-18T10:05:00Z
+Stop C,90,60,2024-11-18T10:10:00Z
