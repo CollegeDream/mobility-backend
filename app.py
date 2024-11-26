@@ -10,6 +10,7 @@ from flask import Flask, jsonify, request, Response
 from flask_cors import CORS, cross_origin
 from kafka import KafkaProducer, KafkaConsumer
 import json
+import pandas as pd
 
 # from ingestion.ingest_bus import ingest_bus_file
 # from ingestion.ingest_van import ingest_van_file
@@ -41,7 +42,7 @@ from processing.process_van_dispatch import correlate_van_services
 app = Flask(__name__)
 
 # Generalized function to ingest data from file to kafka producer
-def ingest_file(file,  topic, file_type, keys, key_types, broker=KAFKA_BROKER):
+def ingest_json(file,  topic, file_type, keys, key_types, broker=KAFKA_BROKER):
     producer = KafkaProducer(
         bootstrap_servers=broker,
         value_serializer=lambda v: json.dumps(v).encode('utf-8')
@@ -59,12 +60,41 @@ def ingest_file(file,  topic, file_type, keys, key_types, broker=KAFKA_BROKER):
                 producer.send(topic, value=record)
                 print(f"Sent to Kafka ({file_type}): {record}")
             else:
-                print(f"{record} is incomplete or malformed")
+                print(f"{record} is incomplete or malformed.")
 
         print(f"{file_type} data ingested successfully.")
     except Exception as e:
         raise RuntimeError(f"Error reading or ingesting {file_type} data: {e}")
 
+def ingest_csv(file, file_type, topic, keys, key_types, broker=KAFKA_BROKER):
+    producer = KafkaProducer(
+        bootstrap_servers=broker,
+        value_serializer=lambda v: json.dumps(v).encode('utf-8')
+    )
+
+    if not os.path.exists(file):
+        print(f"{file_type} file not found: {file}")
+        return
+
+    try:
+        # Read the CSV file using pandas
+        df = pd.read_csv(file)
+        # Get the column names from the first line
+        keys = df.columns.tolist()
+
+        for _, row in df.iterrows():
+            # Convert the row to a dictionary using the column names as keys
+            record = {key: row[key] for key in keys}
+            if validate_schema(record, keys, key_types):
+                producer.send(topic, value=record)
+                print(f"Sent to Kafka: {record}")
+            else:
+                print(f"{record} is malformed or incomplete.")
+
+        print("All passenger data ingested successfully.")
+    except Exception as e:
+        print(f"Error reading or ingesting data: {e}")
+    
 
 @app.route('/ingest', methods=['POST'])
 @cross_origin()
@@ -79,7 +109,7 @@ def ingest_data():
         bus_keys =  ["bus_id", "lat", "lon", "timestamp"]
         bus_key_types = {"bus_id": str, "lat": float, "lon": float, "timestamp": str}
         if bus_file:
-            ingest_file(bus_file, topic='bus_location', file_type="Bus", keys=bus_keys, key_types=bus_key_types)
+            ingest_json(bus_file, topic='bus_location', file_type="Bus", keys=bus_keys, key_types=bus_key_types)
             responses["bus_file"] = "Ingestion successful"
         else:
             responses["bus_file"] = "No file path provided for {file_type} data"
@@ -88,7 +118,7 @@ def ingest_data():
         van_keys =  ["van_id", "lat", "lon", "timestamp"]
         van_key_types = {"van_id": str, "lat": float, "lon": float, "timestamp": str}
         if van_file:
-            ingest_file(van_file,  topic='van_location', file_type="Van", keys=van_keys, key_types=van_key_types)
+            ingest_json(van_file,  topic='van_location', file_type="Van", keys=van_keys, key_types=van_key_types)
             responses["van_file"] = "Ingestion successful"
         else:
             responses["van_file"] = "No file path provided for {file_type} data"
@@ -97,16 +127,16 @@ def ingest_data():
         weather_keys =  ["lat", "lon", "temp", "precipitation", "timestamp"]
         weather_key_types = {"lat": float, "lon": float, "temp": int, "precipitation": str, "timestamp": str}
         if weather_file:
-            ingest_file(weather_file, topic='weather_update', file_type="Weather", keys=weather_keys, key_types=weather_key_types)
+            ingest_json(weather_file, topic='weather_update', file_type="Weather", keys=weather_keys, key_types=weather_key_types)
             responses["weather_file"] = "Ingestion successful"
         else:
             responses["weather_file"] = "No file path provided for {file_type} data"
 
         passenger_file = files.get("passenger_file")
-        passenger_keys = ["location", "waiting", "avg_wait", "timestamp"]
-        passenger_keys_types = {"location": str, "waiting": int, "avg_wait": int, "timestamp": str}
+        passenger_keys = ["location", "lat", "lon", "timestamp", "waiting", "avg_wait"]
+        passenger_keys_types = {"location": str, "lat": float, "lon": float, "timestamp": str, "waiting": int, "avg_wait": int}
         if passenger_file:
-            ingest_file(passenger_file,  topic='passenger_data', file_type="Passenger")
+            ingest_csv(passenger_file, file_type="Passenger",  topic='passenger_data', keys=passenger_keys, key_types=passenger_keys_types)
             responses["passenger_file"] = "Ingestion successful"
         else:
             responses["passenger_file"] = "No file path provided"
@@ -133,6 +163,7 @@ def process_data():
         return jsonify({"message": "Processing completed successfully"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 
 @app.route('/dashboard', methods=['GET'])
