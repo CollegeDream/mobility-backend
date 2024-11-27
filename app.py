@@ -1,7 +1,5 @@
 import sys
 
-from processing.process_van_dispatch import correlate_van_services
-
 if sys.version_info >= (3, 12, 0):
     import six
     sys.modules['kafka.vendor.six.moves'] = six.moves
@@ -10,15 +8,13 @@ from flask import Flask, jsonify, request, Response
 from flask_cors import CORS, cross_origin
 from kafka import KafkaProducer, KafkaConsumer
 import json
-import pandas as pd
-
-# from ingestion.ingest_bus import ingest_bus_file
-# from ingestion.ingest_van import ingest_van_file
-# from ingestion.ingest_weather import ingest_weather_file
-# from ingestion.ingest_passengers import ingest_passenger_data_from_csv
+from processing.process_delay import correlate_bus_weather
+from processing.process_van_dispatch import correlate_van_services
+from ingestion.ingest_csv import ingest_csv
+from ingestion.ingest_json import ingest_json
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 @app.before_request
 def handle_preflight():
@@ -31,71 +27,6 @@ def handle_preflight():
 KAFKA_BROKER = 'localhost:9092'
 producer = KafkaProducer(bootstrap_servers=KAFKA_BROKER, value_serializer=lambda v: json.dumps(v).encode('utf-8'))
 
-from flask import Flask, jsonify, request
-from kafka import KafkaProducer
-import json
-import os
-from utils import validate_schema
-from processing.process_delay import correlate_bus_weather
-from processing.process_van_dispatch import correlate_van_services
-
-app = Flask(__name__)
-
-# Generalized function to ingest data from file to kafka producer
-def ingest_json(file,  topic, file_type, keys, key_types, broker=KAFKA_BROKER):
-    producer = KafkaProducer(
-        bootstrap_servers=broker,
-        value_serializer=lambda v: json.dumps(v).encode('utf-8')
-    )
-
-    if not os.path.exists(file):
-        raise FileNotFoundError(f"{file_type} file not found: {file}")
-
-    try:
-        with open(file, 'r') as f:
-            data = json.load(f)
-        
-        for record in data:
-            if validate_schema(record, keys, key_types):
-                producer.send(topic, value=record)
-                print(f"Sent to Kafka ({file_type}): {record}")
-            else:
-                print(f"{record} is incomplete or malformed.")
-
-        print(f"{file_type} data ingested successfully.")
-    except Exception as e:
-        raise RuntimeError(f"Error reading or ingesting {file_type} data: {e}")
-
-def ingest_csv(file, file_type, topic, keys, key_types, broker=KAFKA_BROKER):
-    producer = KafkaProducer(
-        bootstrap_servers=broker,
-        value_serializer=lambda v: json.dumps(v).encode('utf-8')
-    )
-
-    if not os.path.exists(file):
-        print(f"{file_type} file not found: {file}")
-        return
-
-    try:
-        # Read the CSV file using pandas
-        df = pd.read_csv(file)
-        # Get the column names from the first line
-        keys = df.columns.tolist()
-
-        for _, row in df.iterrows():
-            # Convert the row to a dictionary using the column names as keys
-            record = {key: row[key] for key in keys}
-            if validate_schema(record, keys, key_types):
-                producer.send(topic, value=record)
-                print(f"Sent to Kafka: {record}")
-            else:
-                print(f"{record} is malformed or incomplete.")
-
-        print("All passenger data ingested successfully.")
-    except Exception as e:
-        print(f"Error reading or ingesting data: {e}")
-    
-
 @app.route('/ingest', methods=['POST'])
 @cross_origin()
 def ingest_data():
@@ -103,6 +34,8 @@ def ingest_data():
     if not files:
         return jsonify({"error": "File paths for ingestion are required"}), 400
 
+    # Get files from data using addresses sent from the frontend
+    # Keys and key types are specified for validation
     responses = {}
     try:
         bus_file = files.get("bus_file")
@@ -150,13 +83,12 @@ def ingest_data():
 
     return jsonify(responses), 200
 
-@app.route('/process', methods=['POST'])
+@app.route('/process', methods=['GET', 'OPTIONS'])
 @cross_origin()
 def process_data():
     try:
         # First correlate bus delays with weather
         correlate_bus_weather("bus_location", "weather_update", "bus_with_delay")
-
         # Then correlate van requirements using updated bus data
         correlate_van_services("bus_with_delay", "passenger_data", "van_output")
 
@@ -165,17 +97,28 @@ def process_data():
         return jsonify({"error": str(e)}), 500
 
 
-
 @app.route('/dashboard', methods=['GET'])
+@cross_origin()
 def dashboard():
+    consumer_delays = KafkaConsumer("bus_with_delay", bootstrap_servers=KAFKA_BROKER, value_deserializer=lambda x: json.loads(x.decode('utf-8')))
+    consumer_vans = KafkaConsumer("van_output", bootstrap_servers=KAFKA_BROKER, value_deserializer=lambda x: json.loads(x.decode('utf-8')))
     
+    delays = []
+    vans = []
+
+    # Collect all bus delay messages
+    for delay_msg in consumer_delays:
+        delays.append(delay_msg.value)
+        print(f"Delay Data: {delay_msg.value}")
+
+    # Collect all van dispatch messages
+    for van_msg in consumer_vans:
+        vans.append(van_msg.value)
+        print(f"Van Data: {van_msg.value}")
+
     return jsonify({
-        "delays": [
-            {"bus_id": "B001", "delay_reason": "Snow", "delay_time": "5 mins"}
-        ],
-        "van_requirements": [
-            {"location": "Stop A", "reason": "High passenger count"}
-        ]
+        "delays": delays,
+        "van_requirements": vans
     })
 
 if __name__ == '__main__':
